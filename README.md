@@ -631,5 +631,17 @@ VoxCPM model weights and code are open-sourced under the [Apache-2.0](LICENSE) l
 ## ⭐ Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=OpenBMB/VoxCPM&type=Date)](https://star-history.com/#OpenBMB/VoxCPM&Date)
-#   v o i c e - a i  
- 
+
+## How to Run
+
+```cmd
+python app.py --port 8808
+```
+
+Optional arguments:
+
+```cmd
+python app.py --port 8808 --device cuda --model-id openbmb/VoxCPM2
+```
+
+Then open http://localhost:8808 in your browser.

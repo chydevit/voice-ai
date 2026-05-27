@@ -1,12 +1,33 @@
 import os
 import re
 import sys
+import random
 import logging
 import numpy as np
 import gradio as gr
+import torch
 from typing import Optional, Tuple
 from funasr import AutoModel
 from pathlib import Path
+
+LANGUAGES = [
+    "Auto", "English", "Chinese", "Japanese", "Korean", "Spanish",
+    "French", "German", "Italian", "Portuguese", "Russian", "Arabic",
+    "Hindi", "Vietnamese", "Thai", "Indonesian", "Dutch", "Turkish",
+    "Polish", "Swedish", "Czech", "Greek", "Hebrew", "Ukrainian",
+    "Romanian", "Hungarian", "Finnish", "Danish", "Norwegian", "Malay",
+]
+
+VOICE_PRESETS = {
+    "None": "",
+    "Calm female narrator": "Calm, warm female voice with steady pacing, gentle and reassuring tone.",
+    "Energetic male host": "Bright, upbeat young male voice with high energy and enthusiastic delivery.",
+    "Deep authoritative male": "Deep, resonant male voice, slow and authoritative, like a documentary narrator.",
+    "Cheerful young girl": "Light, cheerful young girl's voice, playful and expressive, slightly fast pace.",
+    "Soft whispering voice": "Soft, intimate whispering voice, very slow and breathy.",
+    "Gentle melancholic girl": "A young girl with a soft, sweet voice. Speaks slowly with a melancholic, slightly tsundere tone.",
+    "Laid-back surfer dude": "Relaxed young male voice, slightly nasal, laid-back surfer vibe.",
+}
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -279,6 +300,7 @@ class VoxCPMDemo:
         do_normalize: bool,
         denoise: bool,
         inference_timesteps: int = 10,
+        max_len: int = 4096,
     ) -> dict:
         generate_kwargs = dict(
             text=final_text,
@@ -287,6 +309,7 @@ class VoxCPMDemo:
             inference_timesteps=inference_timesteps,
             normalize=do_normalize,
             denoise=denoise,
+            max_len=int(max_len),
         )
         if prompt_text_clean and audio_path:
             generate_kwargs["prompt_wav_path"] = audio_path
@@ -303,6 +326,9 @@ class VoxCPMDemo:
         do_normalize: bool = True,
         denoise: bool = True,
         inference_timesteps: int = 10,
+        max_len: int = 4096,
+        seed: int = -1,
+        language: str = "Auto",
     ) -> Tuple[int, np.ndarray]:
         current_model = self.get_or_load_voxcpm()
 
@@ -311,10 +337,21 @@ class VoxCPMDemo:
             raise ValueError("Please input text to synthesize.")
 
         control = (control_instruction or "").strip()
+        if language and language != "Auto":
+            lang_hint = f"Speak in {language}."
+            control = f"{lang_hint} {control}".strip() if control else lang_hint
         # Strip any parentheses (half-width/full-width) from control text to avoid
         # breaking the "(control)text" prompt format expected by the model.
         control = re.sub(r"[()（）]", "", control).strip()
         final_text = f"({control}){text}" if control else text
+
+        if seed is not None and int(seed) >= 0:
+            s = int(seed)
+            random.seed(s)
+            np.random.seed(s)
+            torch.manual_seed(s)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(s)
 
         audio_path = reference_wav_path_input if reference_wav_path_input else None
         prompt_text_clean = (prompt_text or "").strip() or None
@@ -335,6 +372,7 @@ class VoxCPMDemo:
             do_normalize=do_normalize,
             denoise=denoise,
             inference_timesteps=inference_timesteps,
+            max_len=max_len,
         )
         wav = current_model.generate(**generate_kwargs)
         return (current_model.tts_model.sample_rate, wav)
@@ -355,18 +393,28 @@ def create_demo_interface(demo: VoxCPMDemo):
         do_normalize: bool,
         denoise: bool,
         dit_steps: int,
+        max_len: int,
+        seed: int,
+        language: str,
+        voice_preset: str,
     ):
         actual_prompt_text = prompt_text_value.strip() if use_prompt_text else ""
-        actual_control = "" if use_prompt_text else control_instruction
+        preset_text = VOICE_PRESETS.get(voice_preset or "None", "")
+        base_control = "" if use_prompt_text else (control_instruction or "")
+        if preset_text and not base_control.strip():
+            base_control = preset_text
         sr, wav_np = demo.generate_tts_audio(
             text_input=text,
-            control_instruction=actual_control,
+            control_instruction=base_control,
             reference_wav_path_input=ref_wav,
             prompt_text=actual_prompt_text,
             cfg_value_input=cfg_value,
             do_normalize=do_normalize,
             denoise=denoise,
             inference_timesteps=int(dit_steps),
+            max_len=int(max_len),
+            seed=int(seed),
+            language=language or "Auto",
         )
         return (sr, wav_np)
 
@@ -424,6 +472,19 @@ def create_demo_interface(demo: VoxCPMDemo):
                     lines=2,
                     visible=False,
                 )
+                with gr.Row():
+                    language = gr.Dropdown(
+                        choices=LANGUAGES,
+                        value="Auto",
+                        label="Language",
+                        info="Hint the model with a target language (or Auto).",
+                    )
+                    voice_preset = gr.Dropdown(
+                        choices=list(VOICE_PRESETS.keys()),
+                        value="None",
+                        label="Voice Preset",
+                        info="Quick-fill the Control Instruction with a preset voice.",
+                    )
                 control_instruction = gr.Textbox(
                     value="",
                     label=I18N("control_label"),
@@ -465,11 +526,28 @@ def create_demo_interface(demo: VoxCPMDemo):
                         label=I18N("dit_steps_label"),
                         info=I18N("dit_steps_info"),
                     )
+                    max_len = gr.Slider(
+                        minimum=1024,
+                        maximum=32768,
+                        value=4096,
+                        step=512,
+                        label="Max Generation Length (tokens)",
+                        info="Increase to allow longer audio output. Higher values use more memory and time.",
+                    )
+                    seed = gr.Number(
+                        value=-1,
+                        precision=0,
+                        label="Seed",
+                        info="Set a non-negative integer for reproducible output. -1 means random.",
+                    )
 
                 run_btn = gr.Button(I18N("generate_btn"), variant="primary", size="lg")
 
             with gr.Column():
-                audio_output = gr.Audio(label=I18N("generated_audio_label"))
+                audio_output = gr.Audio(
+                    label=I18N("generated_audio_label"),
+                    interactive=False,
+                )
                 gr.Markdown(I18N("examples_footer"))
 
         show_prompt_text.change(
@@ -494,6 +572,10 @@ def create_demo_interface(demo: VoxCPMDemo):
                 DoNormalizeText,
                 DoDenoisePromptAudio,
                 dit_steps,
+                max_len,
+                seed,
+                language,
+                voice_preset,
             ],
             outputs=[audio_output],
             show_progress=True,
